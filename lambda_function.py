@@ -103,6 +103,7 @@ class Cin7Session(requests.Session):
         for page in range(1, max_pages + 1):
             qp = dict(params)
             qp["page"] = page
+            qp["rows"] = 250  # Cin7 API supports up to 250 rows per page
             url = self.BASE + resource
             r = self._backoff(url, qp)
             if not r.text or r.text == last_text:
