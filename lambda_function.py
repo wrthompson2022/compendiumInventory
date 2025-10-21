@@ -586,7 +586,7 @@ def build_inventory_csv(conn, team: str, run_id: uuid.UUID, instance: str) -> Li
             (team, run_id, instance),
         )
         for branch_id, sku, dte, qty in cur.fetchall():
-            rows.append((bname(branch_id), sku, dte.isoformat(), str(qty)))
+            rows.append((bname(branch_id), sku, dte.strftime("%Y%m%d"), str(qty)))
     return rows
 
 def sftp_put(sftp_cfg: dict, local_bytes: bytes, remote_path: str):
