@@ -242,19 +242,20 @@ def pull_sales_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                             continue
                         qty = Decimal(str(li.get("qty") or 0))
                         shipped = Decimal(str(li.get("qtyShipped") or 0))
-                        demand = qty if hdr_status == "Draft" else max(qty - shipped, Decimal("0"))
+                        # Calculate open demand as qty - qtyShipped (regardless of Draft/Open status)
+                        demand = max(qty - shipped, Decimal("0"))
                         if demand == 0:
                             continue
                         cur.execute(
                             """
                             INSERT INTO cin7_open_so
                             (team_name, run_id, instance, branch_id, so_number, so_line_id, sku,
-                             qty_demand, req_ship_date, customer_id, status, approved)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                             qty, qty_shipped, qty_demand, req_ship_date, customer_id, status, approved)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                             ON CONFLICT (team_name, run_id, instance, so_line_id) DO NOTHING
                             """,
                             (team, run_id, sess.label, bid, so.get("reference") or str(so.get("id")),
-                             f"{so.get('id')}-{li.get('id')}", sku, demand, req_date,
+                             f"{so.get('id')}-{li.get('id')}", sku, qty, shipped, demand, req_date,
                              so.get("memberId"), hdr_status, is_approved),
                         )
                         inserted += 1
@@ -278,19 +279,20 @@ def pull_purchase_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                             continue
                         qty = Decimal(str(li.get("qty") or 0))
                         recv = Decimal(str(li.get("qtyReceived") or 0))
-                        open_qty = qty if hdr_status == "Draft" else max(qty - recv, Decimal("0"))
+                        # Calculate open quantity as qty - qtyReceived (regardless of Draft/Open status)
+                        open_qty = max(qty - recv, Decimal("0"))
                         if open_qty == 0:
                             continue
                         cur.execute(
                             """
                             INSERT INTO cin7_open_po
                             (team_name, run_id, instance, branch_id, po_number, po_line_id, sku,
-                             qty_open, eta_date, supplier_code, status)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                             qty, qty_received, qty_open, eta_date, supplier_code, status)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                             ON CONFLICT (team_name, run_id, instance, po_line_id) DO NOTHING
                             """,
                             (team, run_id, sess.label, bid, po.get("reference") or str(po.get("id")),
-                             f"{po.get('id')}-{li.get('id')}", sku, open_qty, eta,
+                             f"{po.get('id')}-{li.get('id')}", sku, qty, recv, open_qty, eta,
                              str(po.get("supplierId") or ""), hdr_status),
                         )
                         inserted += 1
