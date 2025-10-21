@@ -512,7 +512,7 @@ def build_inventory_csv(conn, team: str, run_id: uuid.UUID, instance: str) -> Li
     return rows
 
 def sftp_put(sftp_cfg: dict, local_bytes: bytes, remote_path: str):
-    host = sftp_cfg["host"]
+    host = sftp_cfg["hostname"]
     port = int(sftp_cfg.get("port", 22))
     username = sftp_cfg["username"]
     password = sftp_cfg["password"]
