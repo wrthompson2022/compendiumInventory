@@ -267,7 +267,7 @@ def pull_sales_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
     BATCH_SIZE = 1000
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
-            where = f"status in ('Open','Draft','Approved') and branchId={bid}"
+            where = f"stage in ('New','Dispatched') and branchId={bid}"
             params = {"fields": FIELDS_SALES, "where": where}
             batch = []
             inserted = 0
@@ -323,7 +323,7 @@ def pull_purchase_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
     BATCH_SIZE = 1000
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
-            where = f"stage in ('Open','Draft') and branchId={bid}"
+            where = f"stage='New' and branchId={bid}"
             params = {"fields": FIELDS_PURCHASE, "where": where}
             batch = []
             inserted = 0
