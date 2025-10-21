@@ -300,7 +300,7 @@ def pull_purchase_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
 # ----------------------------
 def compute_bucketed_atp(conn, team: str, run_id: uuid.UUID, instance: str):
     """
-    Produce bucketed ATP with exactly these bucket dates per (branch, sku):
+    Produce bucketed ATS (Available To Sell) with exactly these bucket dates per (branch, sku):
       - TODAY (always)
       - each PO eta_date in ascending order
 
@@ -309,7 +309,12 @@ def compute_bucketed_atp(conn, team: str, run_id: uuid.UUID, instance: str):
       - Bucket i (eta_i): all SO demand with req_ship_date >= eta_{i-1} and < eta_i
       - Bucket last (eta_n): all SO demand with req_ship_date >= eta_n
 
-    Each bucket row stores opening, receipts (POs at that date), demand, ending_atp.
+    ATS Calculation (per Excel specification):
+      For each bucket, ATS = IF(sum(demand[i:end]) > sum(supply[i:end]), 0, on_hand + receipts - demand)
+      Where supply = current on_hand + all future receipts
+
+      This ensures that if total remaining demand exceeds total remaining supply,
+      ATS is set to 0 for that period (and typically all subsequent periods).
     """
     today = dt.date.today()
 
@@ -393,26 +398,38 @@ def compute_bucketed_atp(conn, team: str, run_id: uuid.UUID, instance: str):
             # Prepare receipts dict (none on 'today')
             rec_map = {d: q for d, q in receipts_by_eta if d is not None}
 
-            running = opening
-            prev_cut = None  # for demand window lower bound
+            # Build list of (bucket_date, receipts, demand) for all buckets first
+            bucket_data = []
+            prev_cut = None
             for idx, bdate in enumerate(bucket_dates):
-                # Determine next cutoff (upper bound) for demand assignment
                 next_cut = bucket_dates[idx + 1] if idx + 1 < len(bucket_dates) else None
-
-                # Receipts land only on an ETA bucket date
                 receipts = rec_map.get(bdate, Decimal("0")) if bdate != today else Decimal("0")
 
-                # Demand allocated to this bucket:
-                #  - today bucket: req_ship_date < first ETA
-                #  - ETA bucket i: prev_cut <= req_ship_date < next_cut (prev_cut is previous ETA)
-                #  - last ETA bucket: req_ship_date >= last ETA
                 if idx == 0:
-                    demand = sum_demand(None, next_cut)  # all demand before first ETA (or all, if no POs)
+                    demand = sum_demand(None, next_cut)
                 else:
                     demand = sum_demand(prev_cut, next_cut)
 
+                bucket_data.append((bdate, receipts, demand))
+                prev_cut = bdate
+
+            # Now calculate ATS for each bucket using forward-looking logic
+            running = opening  # Track running balance for opening_balance field
+            for idx, (bdate, receipts, demand) in enumerate(bucket_data):
+                # Calculate total remaining supply from this bucket forward
+                # Supply = current running balance (on-hand at this bucket) + all future receipts
+                future_receipts = sum(r for _, r, _ in bucket_data[idx:])
+                total_remaining_supply = running + future_receipts
+
+                # Calculate total remaining demand from this bucket forward
+                total_remaining_demand = sum(d for _, _, d in bucket_data[idx:])
+
+                # ATS Formula: IF(total_remaining_demand > total_remaining_supply, 0, on_hand + receipts - demand)
                 opening_balance = running
-                ending = opening_balance + receipts - demand
+                if total_remaining_demand > total_remaining_supply:
+                    ending_ats = Decimal("0")
+                else:
+                    ending_ats = opening_balance + receipts - demand
 
                 # Upsert row
                 cur.execute(
@@ -428,11 +445,11 @@ def compute_bucketed_atp(conn, team: str, run_id: uuid.UUID, instance: str):
                            ending_atp=EXCLUDED.ending_atp
                     """,
                     (team, run_id, instance, branch_id, sku, bdate,
-                     opening_balance, receipts, demand, ending),
+                     opening_balance, receipts, demand, ending_ats),
                 )
 
-                running = ending
-                prev_cut = bdate  # next bucket’s lower bound is this ETA
+                # Update running balance for next bucket's opening
+                running = running + receipts - demand
 
             # Edge case: no POs and no SOs — still ensure TODAY row exists
             if not eta_list and not demand_by_date:
