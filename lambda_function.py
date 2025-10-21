@@ -227,7 +227,7 @@ def pull_sales_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                       branch_ids: List[int], eligible: set):
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
-            where = f"status in ('Open','Draft') and branchId={bid}"
+            where = f"status in ('Open','Draft','Approved') and branchId={bid}"
             params = {"fields": FIELDS_SALES, "where": where}
             inserted = 0
             for page in sess.get_pages("SalesOrders", params, max_pages=300):
@@ -265,7 +265,7 @@ def pull_purchase_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                          branch_ids: List[int], eligible: set):
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
-            where = f"status in ('Open','Draft') and branchId={bid}"
+            where = f"status in ('Open','Draft','Approved') and branchId={bid}"
             params = {"fields": FIELDS_PURCHASE, "where": where}
             inserted = 0
             for page in sess.get_pages("PurchaseOrders", params, max_pages=300):
