@@ -267,7 +267,7 @@ def pull_sales_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
     BATCH_SIZE = 1000
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
-            where = f"stage in ('New','Dispatched') and branchId={bid}"
+            where = f"stage='New' and branchId={bid}"
             params = {"fields": FIELDS_SALES, "where": where}
             batch = []
             inserted = 0
@@ -419,10 +419,10 @@ def compute_bucketed_atp(conn, team: str, run_id: uuid.UUID, instance: str):
         for row in pairs:
             branch_id, sku = row["branch_id"], row["sku"]
 
-            # Opening = current available (can be 0)
+            # Opening = current on_hand (can be 0)
             cur.execute(
                 """
-                SELECT available FROM cin7_stock_snapshot
+                SELECT on_hand FROM cin7_stock_snapshot
                  WHERE team_name=%s AND run_id=%s AND instance=%s
                    AND branch_id=%s AND sku=%s
                 """,
