@@ -140,6 +140,9 @@ def pull_products(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
         params["where"] += f" and styleCode='{style_filter}'"
 
     option_codes = set()
+    batch = []
+    BATCH_SIZE = 1000
+
     with conn, conn.cursor() as cur:
         psycopg2.extras.register_uuid()
         for page in sess.get_pages("Products", params):
@@ -150,18 +153,34 @@ def pull_products(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                     if not option_code:
                         continue
                     option_codes.add(option_code)
-                    cur.execute(
-                        """
-                        INSERT INTO cin7_product_snapshot
-                        (team_name, run_id, instance, product_id, product_code, style_code,
-                         option_id, option_code, option_style_code, is_active, eligible, raw_json)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,False,%s)
-                        ON CONFLICT (team_name, run_id, instance, option_code) DO NOTHING
-                        """,
-                        (team, run_id, sess.label, p.get("id"), p.get("code"),
-                         style_code, opt.get("id"), option_code, style_code,
-                         bool(p.get("isActive", True)), json.dumps({"p": p})),
-                    )
+                    batch.append((
+                        team, run_id, sess.label, p.get("id"), p.get("code"),
+                        style_code, opt.get("id"), option_code, style_code,
+                        bool(p.get("isActive", True))
+                    ))
+
+                    if len(batch) >= BATCH_SIZE:
+                        psycopg2.extras.execute_batch(cur,
+                            """
+                            INSERT INTO cin7_product_snapshot
+                            (team_name, run_id, instance, product_id, product_code, style_code,
+                             option_id, option_code, option_style_code, is_active, eligible)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,False)
+                            ON CONFLICT (team_name, run_id, instance, option_code) DO NOTHING
+                            """, batch, page_size=BATCH_SIZE)
+                        batch = []
+
+        # Insert remaining
+        if batch:
+            psycopg2.extras.execute_batch(cur,
+                """
+                INSERT INTO cin7_product_snapshot
+                (team_name, run_id, instance, product_id, product_code, style_code,
+                 option_id, option_code, option_style_code, is_active, eligible)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,False)
+                ON CONFLICT (team_name, run_id, instance, option_code) DO NOTHING
+                """, batch, page_size=len(batch))
+
         # Mark as eligible for this run (you can refine via your mapping job)
         cur.execute(
             """UPDATE cin7_product_snapshot
@@ -180,9 +199,11 @@ def pull_products(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
 
 def pull_stock(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                branch_ids: List[int], eligible: set):
+    BATCH_SIZE = 1000
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
             params = {"fields": FIELDS_STOCK, "where": f"branchId={bid}"}
+            batch = []
             total = 0
             for page in sess.get_pages("Stock", params, max_pages=300):
                 for s in page:
@@ -193,21 +214,39 @@ def pull_stock(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                     alloc = Decimal(str(s.get("stockAllocated") or 0))
                     avail = Decimal(str(s.get("stockAvailable") or 0))
                     updated = s.get("updatedDate")
-                    cur.execute(
-                        """
-                        INSERT INTO cin7_stock_snapshot
-                        (team_name, run_id, instance, branch_id, sku, product_option,
-                         on_hand, allocated, available, updated_at_utc)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT (team_name, run_id, instance, branch_id, sku) DO UPDATE
-                           SET on_hand=EXCLUDED.on_hand, allocated=EXCLUDED.allocated,
-                               available=EXCLUDED.available, updated_at_utc=EXCLUDED.updated_at_utc
-                        """,
-                        (team, run_id, sess.label, bid, sku, s.get("productOptionCode"),
-                         on_hand, alloc, avail,
-                         dt.datetime.fromisoformat(updated.replace("Z","+00:00")) if updated else dt.datetime.utcnow()),
-                    )
+                    batch.append((
+                        team, run_id, sess.label, bid, sku, s.get("productOptionCode"),
+                        on_hand, alloc, avail,
+                        dt.datetime.fromisoformat(updated.replace("Z","+00:00")) if updated else dt.datetime.utcnow()
+                    ))
                     total += 1
+
+                    if len(batch) >= BATCH_SIZE:
+                        psycopg2.extras.execute_batch(cur,
+                            """
+                            INSERT INTO cin7_stock_snapshot
+                            (team_name, run_id, instance, branch_id, sku, product_option,
+                             on_hand, allocated, available, updated_at_utc)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (team_name, run_id, instance, branch_id, sku) DO UPDATE
+                               SET on_hand=EXCLUDED.on_hand, allocated=EXCLUDED.allocated,
+                                   available=EXCLUDED.available, updated_at_utc=EXCLUDED.updated_at_utc
+                            """, batch, page_size=BATCH_SIZE)
+                        batch = []
+
+            # Insert remaining
+            if batch:
+                psycopg2.extras.execute_batch(cur,
+                    """
+                    INSERT INTO cin7_stock_snapshot
+                    (team_name, run_id, instance, branch_id, sku, product_option,
+                     on_hand, allocated, available, updated_at_utc)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (team_name, run_id, instance, branch_id, sku) DO UPDATE
+                       SET on_hand=EXCLUDED.on_hand, allocated=EXCLUDED.allocated,
+                           available=EXCLUDED.available, updated_at_utc=EXCLUDED.updated_at_utc
+                    """, batch, page_size=len(batch))
+
             log.info("[%s] Stock inserted for branch %s: %d rows", sess.label, bid, total)
 
 def _choose(date_str: Optional[str], fallback: Optional[str]) -> dt.date:
@@ -225,10 +264,12 @@ def _choose(date_str: Optional[str], fallback: Optional[str]) -> dt.date:
 
 def pull_sales_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                       branch_ids: List[int], eligible: set):
+    BATCH_SIZE = 1000
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
             where = f"status in ('Open','Draft','Approved') and branchId={bid}"
             params = {"fields": FIELDS_SALES, "where": where}
+            batch = []
             inserted = 0
             for page in sess.get_pages("SalesOrders", params, max_pages=300):
                 for so in page:
@@ -246,27 +287,45 @@ def pull_sales_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                         demand = max(qty - shipped, Decimal("0"))
                         if demand == 0:
                             continue
-                        cur.execute(
-                            """
-                            INSERT INTO cin7_open_so
-                            (team_name, run_id, instance, branch_id, so_number, so_line_id, sku,
-                             qty, qty_shipped, qty_demand, req_ship_date, customer_id, status, approved)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                            ON CONFLICT (team_name, run_id, instance, so_line_id) DO NOTHING
-                            """,
-                            (team, run_id, sess.label, bid, so.get("reference") or str(so.get("id")),
-                             f"{so.get('id')}-{li.get('id')}", sku, qty, shipped, demand, req_date,
-                             so.get("memberId"), hdr_status, is_approved),
-                        )
+                        batch.append((
+                            team, run_id, sess.label, bid, so.get("reference") or str(so.get("id")),
+                            f"{so.get('id')}-{li.get('id')}", sku, qty, shipped, demand, req_date,
+                            so.get("memberId"), hdr_status, is_approved
+                        ))
                         inserted += 1
+
+                        if len(batch) >= BATCH_SIZE:
+                            psycopg2.extras.execute_batch(cur,
+                                """
+                                INSERT INTO cin7_open_so
+                                (team_name, run_id, instance, branch_id, so_number, so_line_id, sku,
+                                 qty, qty_shipped, qty_demand, req_ship_date, customer_id, status, approved)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                ON CONFLICT (team_name, run_id, instance, so_line_id) DO NOTHING
+                                """, batch, page_size=BATCH_SIZE)
+                            batch = []
+
+            # Insert remaining
+            if batch:
+                psycopg2.extras.execute_batch(cur,
+                    """
+                    INSERT INTO cin7_open_so
+                    (team_name, run_id, instance, branch_id, so_number, so_line_id, sku,
+                     qty, qty_shipped, qty_demand, req_ship_date, customer_id, status, approved)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (team_name, run_id, instance, so_line_id) DO NOTHING
+                    """, batch, page_size=len(batch))
+
             log.info("[%s] SO lines inserted for branch %s: %d", sess.label, bid, inserted)
 
 def pull_purchase_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                          branch_ids: List[int], eligible: set):
+    BATCH_SIZE = 1000
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
             where = f"status in ('Open','Draft','Approved') and branchId={bid}"
             params = {"fields": FIELDS_PURCHASE, "where": where}
+            batch = []
             inserted = 0
             for page in sess.get_pages("PurchaseOrders", params, max_pages=300):
                 for po in page:
@@ -283,19 +342,35 @@ def pull_purchase_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
                         open_qty = max(qty - recv, Decimal("0"))
                         if open_qty == 0:
                             continue
-                        cur.execute(
-                            """
-                            INSERT INTO cin7_open_po
-                            (team_name, run_id, instance, branch_id, po_number, po_line_id, sku,
-                             qty, qty_received, qty_open, eta_date, supplier_code, status)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                            ON CONFLICT (team_name, run_id, instance, po_line_id) DO NOTHING
-                            """,
-                            (team, run_id, sess.label, bid, po.get("reference") or str(po.get("id")),
-                             f"{po.get('id')}-{li.get('id')}", sku, qty, recv, open_qty, eta,
-                             str(po.get("supplierId") or ""), hdr_status),
-                        )
+                        batch.append((
+                            team, run_id, sess.label, bid, po.get("reference") or str(po.get("id")),
+                            f"{po.get('id')}-{li.get('id')}", sku, qty, recv, open_qty, eta,
+                            str(po.get("supplierId") or ""), hdr_status
+                        ))
                         inserted += 1
+
+                        if len(batch) >= BATCH_SIZE:
+                            psycopg2.extras.execute_batch(cur,
+                                """
+                                INSERT INTO cin7_open_po
+                                (team_name, run_id, instance, branch_id, po_number, po_line_id, sku,
+                                 qty, qty_received, qty_open, eta_date, supplier_code, status)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                ON CONFLICT (team_name, run_id, instance, po_line_id) DO NOTHING
+                                """, batch, page_size=BATCH_SIZE)
+                            batch = []
+
+            # Insert remaining
+            if batch:
+                psycopg2.extras.execute_batch(cur,
+                    """
+                    INSERT INTO cin7_open_po
+                    (team_name, run_id, instance, branch_id, po_number, po_line_id, sku,
+                     qty, qty_received, qty_open, eta_date, supplier_code, status)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (team_name, run_id, instance, po_line_id) DO NOTHING
+                    """, batch, page_size=len(batch))
+
             log.info("[%s] PO lines inserted for branch %s: %d", sess.label, bid, inserted)
 
 # ----------------------------
