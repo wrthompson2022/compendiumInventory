@@ -267,7 +267,7 @@ def pull_sales_orders(conn, team: str, run_id: uuid.UUID, sess: Cin7Session,
     BATCH_SIZE = 1000
     with conn, conn.cursor() as cur:
         for bid in branch_ids:
-            where = f"stage='New' and branchId={bid}"
+            where = f"stage='New' and status<>'VOID' and branchId={bid}"
             params = {"fields": FIELDS_SALES, "where": where}
             batch = []
             inserted = 0
