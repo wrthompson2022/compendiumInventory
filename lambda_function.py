@@ -491,23 +491,33 @@ def compute_bucketed_atp(conn, team: str, run_id: uuid.UUID, instance: str):
                 bucket_data.append((bdate, receipts, demand))
                 prev_cut = bdate
 
-            # Now calculate ATS for each bucket using forward-looking logic
-            running = opening  # Track running balance for opening_balance field
+            # Now calculate ATS for each bucket - show per-bucket availability, not cumulative
             for idx, (bdate, receipts, demand) in enumerate(bucket_data):
-                # Calculate total remaining supply from this bucket forward
-                # Supply = current running balance (on-hand at this bucket) + all future receipts
-                future_receipts = sum(r for _, r, _ in bucket_data[idx:])
-                total_remaining_supply = running + future_receipts
+                # For TODAY bucket: supply = on_hand, for future buckets: supply = receipts only
+                if idx == 0:
+                    # TODAY bucket
+                    bucket_supply = opening  # on_hand
+                    # Total remaining supply = on_hand + all future receipts
+                    future_receipts = sum(r for _, r, _ in bucket_data[1:])  # Skip today's receipts (always 0)
+                    total_remaining_supply = opening + future_receipts
+                else:
+                    # Future bucket (PO date)
+                    bucket_supply = receipts  # Only receipts arriving on this date
+                    # Total remaining supply = receipts from this bucket forward (no on_hand)
+                    total_remaining_supply = sum(r for _, r, _ in bucket_data[idx:])
 
                 # Calculate total remaining demand from this bucket forward
                 total_remaining_demand = sum(d for _, _, d in bucket_data[idx:])
 
-                # ATS Formula: IF(total_remaining_demand > total_remaining_supply, 0, on_hand + receipts - demand)
-                opening_balance = running
+                # ATS Formula: IF(total_remaining_demand > total_remaining_supply, 0, bucket_supply - demand)
                 if total_remaining_demand > total_remaining_supply:
                     ending_ats = Decimal("0")
                 else:
-                    ending_ats = opening_balance + receipts - demand
+                    # Show only this bucket's availability (not cumulative)
+                    ending_ats = max(bucket_supply - demand, Decimal("0"))
+
+                # For reporting: opening_balance shows what's available at start of this bucket
+                opening_balance = opening if idx == 0 else Decimal("0")
 
                 # Upsert row
                 cur.execute(
@@ -525,9 +535,6 @@ def compute_bucketed_atp(conn, team: str, run_id: uuid.UUID, instance: str):
                     (team, run_id, instance, branch_id, sku, bdate,
                      opening_balance, receipts, demand, ending_ats),
                 )
-
-                # Update running balance for next bucket's opening
-                running = running + receipts - demand
 
             # Edge case: no POs and no SOs — still ensure TODAY row exists
             if not eta_list and not demand_by_date:
